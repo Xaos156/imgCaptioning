@@ -85,8 +85,6 @@ class encoderCNN(nn.Module):
         self.conv3 = nn.Conv2d(64, 128, 3, 1)
         # self.conv3_bn=nn.BatchNorm2d(256)
         # self.conv4 = nn.Conv2d(256,1024, 3, 1)
-        
-        self.attention = SelfAttention(in_dim = 128)
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(12800, 2048)
         self.relu = nn.ReLU()
@@ -110,19 +108,22 @@ class encoderCNN(nn.Module):
 class pretrained_encoderCNN(nn.Module):
     def __init__(self, embedding_dim):
         super(pretrained_encoderCNN, self).__init__()
-        self.inception = models.inception_v3(pretrained=True, aux_logits=False)
-        self.inception.fc = nn.Linear(self.inception.fc.in_features, embedding_dim)
-        #self.relu = nn.ReLU()
+        resnet = models.resnet152(pretrained=True)
+        for param in resnet.parameters():
+            param.requires_grad = False
         
-        for name, param in self.inception.named_parameters():
-            if "fc.weight" in name or "fc.bias" in name:
-                param.requires_grad = True
-            else:
-                param.required_grad = False
+        modules = list(resnet.children())[:-1] #change to -2 if pooling at the end is bad
+        self.resnet = nn.Sequential(*modules)
+        self.embed = nn.Linear(2048, embedding_dim) #adjust size as necessary
+        self.batch= nn.BatchNorm1d(embedding_dim,momentum = 0.01)
+        self.embed.weight.data.normal_(0., 0.02)
+        self.embed.bias.data.fill_(0)
         
-    def forward(self, x):
-        features = self.inception(x)
-        return features
+    def forward(self, images):
+        features = self.resnet(images)
+        out = features.reshape(features.size(0), -1)
+        out = self.batch(self.embed(out)) if out.size(0) > 1 else self.embed(out)
+        return out
 
 
 class decoderRNN(nn.Module):
