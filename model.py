@@ -12,10 +12,8 @@ import torch.optim as optim
 import torchvision.models as models
 from torchsummary import summary
 from random import randint
-import cv2
 from skimage import io, transform
 import math
-from torch.autograd import Variable
 import random
 
 class captionDataset(torch.utils.data.Dataset):
@@ -81,9 +79,9 @@ class encoderCNN(nn.Module):
         self.num_features = 2048
         
         self.conv1 = nn.Conv2d(3, 128, 5, 1)
-        self.conv1_bn=nn.BatchNorm2d(32)
+        self.conv1_bn=nn.BatchNorm2d(128)
         self.conv2 = nn.Conv2d(128, 512, 5, 1)
-        self.conv2_bn=nn.BatchNorm2d(64)
+        self.conv2_bn=nn.BatchNorm2d(512)
         self.conv3 = nn.Conv2d(512, self.num_features, 3, 1)
         # self.conv3_bn=nn.BatchNorm2d(256)
         # self.conv4 = nn.Conv2d(256,1024, 3, 1)
