@@ -78,91 +78,162 @@ class captionDataset(torch.utils.data.Dataset):
 class encoderCNN(nn.Module):
     def __init__(self, embedding_dim):
         super(encoderCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, 5, 1)
+        self.num_features = 2048
+        
+        self.conv1 = nn.Conv2d(3, 128, 5, 1)
         self.conv1_bn=nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, 5, 1)
+        self.conv2 = nn.Conv2d(128, 512, 5, 1)
         self.conv2_bn=nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, 3, 1)
+        self.conv3 = nn.Conv2d(512, self.num_features, 3, 1)
         # self.conv3_bn=nn.BatchNorm2d(256)
         # self.conv4 = nn.Conv2d(256,1024, 3, 1)
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(12800, 2048)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(2048, embedding_dim) #adjust size according to the error here
 
     def convs(self, x):
         x = F.max_pool2d(F.relu(self.conv1_bn(self.conv1(x))), (4,4))
         x = F.max_pool2d(F.relu(self.conv2_bn(self.conv2(x))), (2,2))
         # x = F.max_pool2d(F.relu(self.conv3_bn(self.conv3(x))), (2,2))
-        # x = F.max_pool2d(F.relu(self.conv4(x)), (2,2))
-        x = F.max_pool2d(F.relu(self.conv3(x)), (2,2))
+        # x = self.conv4(x)
+        x = self.conv3(x)
         return x
 
     def forward(self, x):
-        x = self.convs(x)
-        x = self.flatten(x)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        features = self.convs(x)
+        batch, feature_maps, size_1, size_2 = features.size()       
+        features = features.permute(0, 2, 3, 1)
+        features = features.view(batch, size_1*size_2, feature_maps)
+        return features
 
 class pretrained_encoderCNN(nn.Module):
     def __init__(self, embedding_dim):
         super(pretrained_encoderCNN, self).__init__()
+        self.num_features = 2048
+        
         resnet = models.resnet152(pretrained=True)
         for param in resnet.parameters():
             param.requires_grad = False
         
-        modules = list(resnet.children())[:-1] #change to -2 if pooling at the end is bad
+        modules = list(resnet.children())[:-2]
         self.resnet = nn.Sequential(*modules)
-        self.embed = nn.Linear(2048, embedding_dim) #adjust size as necessary
-        self.batch= nn.BatchNorm1d(embedding_dim,momentum = 0.01)
-        self.embed.weight.data.normal_(0., 0.02)
-        self.embed.bias.data.fill_(0)
         
     def forward(self, images):
         features = self.resnet(images)
-        out = features.reshape(features.size(0), -1)
-        out = self.batch(self.embed(out)) if out.size(0) > 1 else self.embed(out)
-        return out
+        batch, feature_maps, size_1, size_2 = features.size()       
+        features = features.permute(0, 2, 3, 1)
+        features = features.view(batch, size_1*size_2, feature_maps)
+        return features
 
 
+class BahdanauAttention(nn.Module):
+    """ Class performs Additive Bahdanau Attention.
+        Source: https://arxiv.org/pdf/1409.0473.pdf
+        Found: https://medium.com/analytics-vidhya/image-captioning-with-attention-part-1-e8a5f783f6d3
+     
+    """    
+    def __init__(self, num_features, hidden_dim, attention_dim, output_dim = 1):
+        super(BahdanauAttention, self).__init__()
+        self.num_features = num_features
+        self.hidden_dim = hidden_dim
+        self.attention_dim = attention_dim
+        self.output_dim = output_dim
+        # fully-connected layer to learn first weight matrix Wa
+        self.W_a = nn.Linear(self.num_features, self.attention_dim)
+        # fully-connected layer to learn the second weight matrix Ua
+        self.U_a = nn.Linear(self.hidden_dim, self.attention_dim)
+        # fully-connected layer to produce score (output), learning weight matrix va
+        self.v_a = nn.Linear(self.attention_dim, self.output_dim)
+                
+    def forward(self, features, decoder_hidden):
+        """
+        Arguments:
+        ----------
+        - features - features returned from Encoder
+        - decoder_hidden - hidden state output from Decoder
+                
+        Returns:
+        ---------
+        - context - context vector with a size of (1,2048)
+        - atten_weight - probabilities, express the feature relevance
+        """
+        # add additional dimension to a hidden (required for summation)
+        decoder_hidden = decoder_hidden.unsqueeze(1)
+        atten_1 = self.W_a(features)
+        atten_2 = self.U_a(decoder_hidden)
+        # apply tangent to combine result from 2 fc layers
+        atten_tan = torch.tanh(atten_1+atten_2)
+        atten_score = self.v_a(atten_tan)
+        atten_weight = F.softmax(atten_score, dim = 1)
+        # first, we will multiply each vector by its softmax score
+        # next, we will sum up this vectors, producing the attention context vector
+        # the size of context equals to a number of feature maps
+        context = torch.sum(atten_weight * features,  dim = 1)
+        atten_weight = atten_weight.squeeze(dim=2)
+        
+        return context, atten_weight    
+    
 class decoderRNN(nn.Module):
-    def __init__(self, device, vocab_size, embedding_dim, hidden_size, num_layers, dropout):
+    def __init__(self, device, vocab_size, embedding_dim, hidden_size, dropout, force_temp, num_features, attention_dim):
         super(decoderRNN, self).__init__()
         self.vocab_size = vocab_size
-        self.num_layers = num_layers
         self.hidden_size = hidden_size #hidden state
         self.device = device
+        self.force_temp = force_temp
         
+        self.init_h = nn.Linear(num_features, hidden_size)
+        self.init_c = nn.Linear(num_features, hidden_size)
+        self.attention = BahdanauAttention(num_features, hidden_size, attention_dim)
         self.embed = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTMCell(input_size=embedding_dim+num_features, hidden_size=hidden_size) #lstm
         self.dropout = nn.Dropout(dropout)
-        self.lstm = nn.LSTM(input_size=embedding_dim, hidden_size=hidden_size,
-                          num_layers=num_layers, dropout = dropout if num_layers>1 else 0, batch_first=True) #lstm
         self.fc = nn.Linear(hidden_size, vocab_size)
+        
     
-    def forward(self, features, captions):
-        h_0 = Variable(torch.zeros(self.num_layers, captions.size(0), self.hidden_size)).to(self.device) #hidden state
-        c_0 = Variable(torch.zeros(self.num_layers, captions.size(0), self.hidden_size)).to(self.device) #internal state
-        x = self.embed(captions)
-        x = self.dropout(torch.cat((features.unsqueeze(1), x), dim = 1))
-        hiddens, _ = self.lstm(x, (h_0, c_0)) #lstm with input, hidden, and internal state
-        out = self.fc(hiddens)
-        return out
+    def init_hidden(self, features): #small fully connected network to initialize states
+        mean_features = torch.mean(features, dim = 1)
+        h0 = self.init_h(mean_features)
+        c0 = self.init_c(mean_features)
+        return h0, c0
+    
+    def forward(self, features, captions, force_prob):
+        embedding = self.embed(captions)
+        h, c = self.init_hidden(features)
+        seq_len = captions.size(1)
+        
+        outputs = torch.zeros(features.size(0), seq_len, self.vocab_size).to(self.device)
+        atten_weights = torch.zeros(features.size(0), seq_len, features.size(1)).to(self.device)
+        
+        for t in range(seq_len):
+            use_sampling = False if t==0 else np.random.random() < force_prob
+            if not use_sampling:
+                word_embed = embedding[:,t,:]
+            context, atten_weight = self.attention(features, h)
+            input_concat = torch.cat([word_embed, context],dim=1)
+            h, c = self.lstm(input_concat, (h,c))
+            h = self.dropout(h)
+            output = self.fc(h)
+            if use_sampling == True:
+                scaled_output = output / self.force_temp
+                scoring = F.log_softmax(scaled_output, dim=1)
+                top_idx = scoring.topk(1)[1]
+                word_embed = self.embed(top_idx).squeeze(1)
+            outputs[:, t, :] = output
+            atten_weights[:, t, :] = atten_weight #Attention weights are here in case of future use
+        return outputs
     
 
 class CaptionNet(nn.Module):
-    def __init__(self, device, vocab_size, embedding_dim, hidden_size, num_layers, dropout, pretrained, word_level):
+    def __init__(self, device, vocab_size, embedding_dim, hidden_size, dropout, pretrained, word_level, force_temp, force_prob, attention_dim):
         super(CaptionNet, self).__init__()
         self.device = device
         self.word_level = word_level
+        self.force_prob = force_prob
         
         
         self.encoder = pretrained_encoderCNN(embedding_dim) if pretrained else encoderCNN(embedding_dim)
-        self.decoder = decoderRNN(device, vocab_size, embedding_dim, hidden_size, num_layers, dropout)
+        self.decoder = decoderRNN(device, vocab_size, embedding_dim, hidden_size, dropout, force_temp, self.encoder.num_features, attention_dim)
         
     def forward(self, images, captions):
         x = self.encoder(images)
-        x = self.decoder(x, captions)
+        x = self.decoder(x, captions, self.force_prob)
         return x
     
     def caption(self, image, int_to_char, maxlen):
@@ -173,21 +244,21 @@ class CaptionNet(nn.Module):
             features = self.encoder(torch.Tensor(image).unsqueeze(0).to(self.device))
             
             for _ in range(maxlen):
-                output = self.decoder(features, caption)
+                output = self.decoder(features, caption, force_prob=1)
                 pred = output.squeeze(0)[-1].argmax().unsqueeze(0)
                 
                 if int_to_char[pred.item()] == "<END>": #stop token
                     break
-                    
+                
                 result += int_to_char[pred.item()] + (" " if self.word_level else "")
                 caption = torch.cat((caption, pred.unsqueeze(0)), dim=1)
-                
+                    
         return result
         
         
         
 class captionGen:
-    def __init__(self, img_size, big_data = False, word_level = False): #img_size should be 299 if using pretrained inception_v3 model
+    def __init__(self, img_size, big_data = False, word_level = False):
         self.history = {"train_loss":[], "validation_loss":[]}
         self.WORD_LEVEL = word_level
         
@@ -207,10 +278,10 @@ class captionGen:
             plt.show()
             print(captioner.caption(self.test_data[idx][0]) + "\n")
     
-    def define(self, embedding_dim, hidden_size, num_layers, dropout, pretrained):
+    def define(self, embedding_dim, hidden_size, attention_dim, dropout, force_temp, force_prob, pretrained):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        self.net = CaptionNet(self.device, len(self.dataset.vocab), embedding_dim, hidden_size, num_layers, dropout, pretrained, self.WORD_LEVEL).to(self.device)
+        self.net = CaptionNet(self.device, len(self.dataset.vocab), embedding_dim, hidden_size, dropout, pretrained, self.WORD_LEVEL, force_temp, force_prob, attention_dim).to(self.device)
         #print(f"\nUsing {self.device} device")
         if not pretrained:
             print(self.net)
@@ -229,8 +300,8 @@ class captionGen:
             loss_sum = 0
             for data in tqdm(dataloader, desc = "training") if verbose in [1,2] else dataloader:
                 self.net.zero_grad()
-                outputs = self.net(data[0].to(self.device), data[1].to(self.device)[:,:-1])
-                loss = loss_criterion(outputs.reshape(-1,outputs.shape[2]), data[1].reshape(-1).to(self.device))
+                outputs = self.net(data[0].to(self.device), data[1].to(self.device)[:,:-1]) #input caption excludes last word
+                loss = loss_criterion(outputs.reshape(-1,outputs.shape[2]), data[1][:,1:].reshape(-1).to(self.device)) #target caption excludes first word
                 loss_sum += loss.item()
                 loss.backward()
                 optimizer.step()
@@ -238,13 +309,11 @@ class captionGen:
                 print(f"loss:\t{loss_sum/len(dataloader)}")
             self.history["train_loss"] += [loss_sum/len(dataloader)]
             
-            #clear gpu memory here
-            
             val_loss_sum = 0
             for val_data in tqdm(valdataloader, desc = "validating") if verbose in [1,2] else valdataloader:
                 with torch.no_grad():
                     outputs = self.net(val_data[0].to(self.device), val_data[1].to(self.device)[:,:-1])
-                    val_loss_sum += loss_criterion(outputs.reshape(-1,outputs.shape[2]), val_data[1].reshape(-1).to(self.device)).item()
+                    val_loss_sum += loss_criterion(outputs.reshape(-1,outputs.shape[2]), val_data[1][:,1:].reshape(-1).to(self.device)).item()
             if verbose in [1,2]:
                 print(f"val loss:\t{val_loss_sum/len(valdataloader)}")
             self.history["validation_loss"] += [val_loss_sum/len(valdataloader)]
