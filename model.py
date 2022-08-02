@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
-from torchsummary import summary
 from random import randint
 from skimage import io, transform
 import math
@@ -123,8 +122,7 @@ class pretrained_encoderCNN(nn.Module):
 
 class BahdanauAttention(nn.Module):
     """ Class performs Additive Bahdanau Attention.
-        Source: https://arxiv.org/pdf/1409.0473.pdf
-        Found: https://medium.com/analytics-vidhya/image-captioning-with-attention-part-1-e8a5f783f6d3
+        Source: https://medium.com/analytics-vidhya/image-captioning-with-attention-part-1-e8a5f783f6d3
      
     """    
     def __init__(self, num_features, hidden_dim, attention_dim, output_dim = 1):
@@ -200,7 +198,7 @@ class decoderRNN(nn.Module):
         atten_weights = torch.zeros(features.size(0), seq_len, features.size(1)).to(self.device)
         
         for t in range(seq_len):
-            use_sampling = False if t==0 else np.random.random() < force_prob
+            use_sampling = False if t==0 else np.random.random() > force_prob
             if not use_sampling:
                 word_embed = embedding[:,t,:]
             context, atten_weight = self.attention(features, h)
@@ -208,7 +206,7 @@ class decoderRNN(nn.Module):
             h, c = self.lstm(input_concat, (h,c))
             h = self.dropout(h)
             output = self.fc(h)
-            if use_sampling == True:
+            if use_sampling:
                 scaled_output = output / self.force_temp
                 scoring = F.log_softmax(scaled_output, dim=1)
                 top_idx = scoring.topk(1)[1]
