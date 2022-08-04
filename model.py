@@ -232,7 +232,7 @@ class CaptionNet(nn.Module):
         x = self.decoder(x, captions, self.force_prob)
         return x
     
-    def caption(self, image, int_to_char, maxlen):
+    def caption(self, image, int_to_char, maxlen, temp = .2):
         result = ""
         caption = torch.Tensor([[1]]).type(torch.LongTensor).to(self.device)
         
@@ -241,7 +241,10 @@ class CaptionNet(nn.Module):
             
             for _ in range(maxlen):
                 output = self.decoder(features, caption, force_prob=1)
-                pred = output.squeeze(0)[-1].argmax().unsqueeze(0)
+                #pred = output.squeeze(0)[-1].argmax().unsqueeze(0)
+                scaled_output = output.squeeze(0)[-1] / temp
+                scoring = F.log_softmax(scaled_output, dim=0)
+                pred = scoring.topk(1)[1]#.unsqueeze(0)
                 
                 if int_to_char[pred.item()] == "<END>": #stop token
                     break
@@ -267,12 +270,12 @@ class captionGen:
         self.test_data, self.val_data = torch.utils.data.random_split(self.test_data, [math.ceil(len(self.test_data)*.5),math.floor(len(self.test_data)*.5)])
         print(f"{len(self.train_data)} training {len(self.test_data)} testing {len(self.val_data)} validation")
     
-    def sample(self, count = 1):
+    def sample(self, count = 1, temp = .2):
         for _ in range(count):
             idx = random.randint(0,len(self.test_data)-1)
             plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
             plt.show()
-            print(captioner.caption(self.test_data[idx][0]) + "\n")
+            print(self.caption(self.test_data[idx][0], temp) + "\n")
     
     def define(self, embedding_dim, hidden_size, attention_dim, dropout, force_temp, force_prob, pretrained):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -315,7 +318,7 @@ class captionGen:
             self.history["validation_loss"] += [val_loss_sum/len(valdataloader)]
             
             if verbose == 2:
-                self.sample()
+                self.sample(3, .2)
     
     
     def curves(self):
@@ -325,5 +328,5 @@ class captionGen:
         plt.plot(self.history["validation_loss"])
         plt.show()
     
-    def caption(self, image):
-        return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen)
+    def caption(self, image, temp):
+        return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen, temp)
