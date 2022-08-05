@@ -48,8 +48,6 @@ class captionDataset(torch.utils.data.Dataset):
         self.char_to_int = dict((c, i) for i, c in enumerate(self.vocab))
         self.int_to_char = dict((i, c) for i, c in enumerate(self.vocab))
         
-        #print(self.int_to_char)
-        
         captions = []
         for k in text:
             captions += [[1]] # 1 represents <START>
@@ -73,9 +71,9 @@ class captionDataset(torch.utils.data.Dataset):
         return img.astype(np.float32), caption.astype(np.int64) #cast as float and long numpy arrays  
 
 class encoderCNN(nn.Module):
-    def __init__(self, embedding_dim):
+    def __init__(self):
         super(encoderCNN, self).__init__()
-        self.num_features = 2048
+        self.num_features = 2048 #hyperparameter
         
         self.conv1 = nn.Conv2d(3, 128, 5, 1)
         self.conv1_bn=nn.BatchNorm2d(128)
@@ -101,9 +99,9 @@ class encoderCNN(nn.Module):
         return features
 
 class pretrained_encoderCNN(nn.Module):
-    def __init__(self, embedding_dim):
+    def __init__(self):
         super(pretrained_encoderCNN, self).__init__()
-        self.num_features = 2048
+        self.num_features = 2048 #NOT hyperparameter
         
         resnet = models.resnet152(pretrained=True)
         for param in resnet.parameters():
@@ -193,9 +191,10 @@ class decoderRNN(nn.Module):
         embedding = self.embed(captions)
         h, c = self.init_hidden(features)
         seq_len = captions.size(1)
+        batch_size = features.size(0)
         
-        outputs = torch.zeros(features.size(0), seq_len, self.vocab_size).to(self.device)
-        atten_weights = torch.zeros(features.size(0), seq_len, features.size(1)).to(self.device)
+        outputs = torch.zeros(batch_size, seq_len, self.vocab_size).to(self.device)
+        atten_weights = torch.zeros(batch_size, seq_len, features.size(1)).to(self.device)
         
         for t in range(seq_len):
             use_sampling = False if t==0 else np.random.random() > force_prob
@@ -224,7 +223,7 @@ class CaptionNet(nn.Module):
         self.force_prob = force_prob
         
         
-        self.encoder = pretrained_encoderCNN(embedding_dim) if pretrained else encoderCNN(embedding_dim)
+        self.encoder = pretrained_encoderCNN() if pretrained else encoderCNN()
         self.decoder = decoderRNN(device, vocab_size, embedding_dim, hidden_size, dropout, force_temp, self.encoder.num_features, attention_dim)
         
     def forward(self, images, captions):
@@ -241,10 +240,9 @@ class CaptionNet(nn.Module):
             
             for _ in range(maxlen):
                 output = self.decoder(features, caption, force_prob=1)
-                #pred = output.squeeze(0)[-1].argmax().unsqueeze(0)
                 scaled_output = output.squeeze(0)[-1] / temp
                 scoring = F.log_softmax(scaled_output, dim=0)
-                pred = scoring.topk(1)[1]#.unsqueeze(0)
+                pred = scoring.topk(1)[1]
                 
                 if int_to_char[pred.item()] == "<END>": #stop token
                     break
@@ -270,22 +268,15 @@ class captionGen:
         self.test_data, self.val_data = torch.utils.data.random_split(self.test_data, [math.ceil(len(self.test_data)*.5),math.floor(len(self.test_data)*.5)])
         print(f"{len(self.train_data)} training {len(self.test_data)} testing {len(self.val_data)} validation")
     
-    def sample(self, count = 1, temp = .2):
-        for _ in range(count):
-            idx = random.randint(0,len(self.test_data)-1)
-            plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
-            plt.show()
-            print(self.caption(self.test_data[idx][0], temp) + "\n")
-    
     def define(self, embedding_dim, hidden_size, attention_dim, dropout, force_temp, force_prob, pretrained):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.net = CaptionNet(self.device, len(self.dataset.vocab), embedding_dim, hidden_size, dropout, pretrained, self.WORD_LEVEL, force_temp, force_prob, attention_dim).to(self.device)
         #print(f"\nUsing {self.device} device")
-        if not pretrained:
-            print(self.net)
-        else:
+        if pretrained:
             print(self.net.decoder)
+        else:
+            print(self.net)
     
     def train(self, batch_size, epochs, lr, verbose):
         self.BATCH_SIZE = batch_size
@@ -320,13 +311,19 @@ class captionGen:
             if verbose == 2:
                 self.sample(3, .2)
     
+    def sample(self, count = 1, temp = .2):
+        for _ in range(count):
+            idx = random.randint(0,len(self.test_data)-1)
+            plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
+            plt.show()
+            print(self.caption(self.test_data[idx][0], temp) + "\n")
+
+    def caption(self, image, temp):
+        return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen, temp)
     
     def curves(self):
         plt.xlabel("Epochs")
         plt.ylabel("Loss")
-        plt.plot(self.history["train_loss"])
-        plt.plot(self.history["validation_loss"])
+        plt.plot(self.history["train_loss"]) #blue is training loss
+        plt.plot(self.history["validation_loss"]) #orange is validation loss
         plt.show()
-    
-    def caption(self, image, temp):
-        return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen, temp)
