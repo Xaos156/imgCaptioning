@@ -20,7 +20,7 @@ class captionDataset(torch.utils.data.Dataset):
     char_to_int = {}
     int_to_char = {}
     
-    def __init__(self, root="data/images/", annotations="data/captions.txt", img_size=299, word_level=False):
+    def __init__(self, root="data\\images\\", annotations="data\\captions.txt", img_size=299, word_level=False):
         self.root = root
         self.IMG_SIZE = img_size
         self.vocab = ["<PAD>", "<START>", "<END>", "\xa0"]
@@ -65,7 +65,7 @@ class captionDataset(torch.utils.data.Dataset):
         return len(self.y)
     
     def __getitem__(self, idx):
-        img = io.imread(self.root +self.X[idx]) #using skimiage because its RGB and way faster than pillow 
+        img = io.imread(self.root+self.X[idx]) #using skimiage because its RGB and way faster than pillow
         img = cv2.resize(img,(self.IMG_SIZE,self.IMG_SIZE)).reshape(-1, self.IMG_SIZE, self.IMG_SIZE)/255.0
         caption = np.array(self.y[idx])
         return img.astype(np.float32), caption.astype(np.int64) #cast as float and long numpy arrays  
@@ -254,7 +254,7 @@ class CaptionNet(nn.Module):
         
         
         
-class captionGen:
+class captionGen: #wrapper object for easy training
     def __init__(self, img_size, big_data = False, word_level = False):
         self.history = {"train_loss":[], "validation_loss":[]}
         self.WORD_LEVEL = word_level
