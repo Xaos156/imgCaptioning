@@ -23,10 +23,10 @@ class captionDataset(torch.utils.data.Dataset):
     def __init__(self, root="data\\images\\", annotations="data\\captions.txt", img_size=299, word_level=False):
         self.root = root
         self.IMG_SIZE = img_size
-        self.vocab = ["<PAD>", "<START>", "<END>", "\xa0"]
+        self.vocab = ["<PAD>", "<START>", "<END>", "\xa0"] #\xa0 is an "empty character". I put it here to fix an error
         
         with open(annotations, encoding='utf8') as file:
-            csv_reader = np.array(list(csv.reader(file, delimiter="|")))
+            csv_reader = np.array(list(csv.reader(file, delimiter="|"))) # gotta love mutability
         files, text = np.split(csv_reader[1:], 2, axis = 1)
         files = files.squeeze(1) #remove the leftover dimension from the split
         text = text.squeeze(1)
@@ -57,8 +57,8 @@ class captionDataset(torch.utils.data.Dataset):
             
             
         
-        self.X = files
-        self.y = captions
+        self.X = files #X represents inputs
+        self.y = captions #y represents labels
     
     
     def __len__(self):
@@ -260,9 +260,9 @@ class captionGen: #wrapper object for easy training
         self.WORD_LEVEL = word_level
         
         if big_data:
-            self.dataset = captionDataset(root="data/big_images/", annotations="data/big_captions.txt", img_size=img_size, word_level=word_level)
+            self.dataset = captionDataset(root="data\\big_images\\", annotations="data\\big_captions.txt", img_size=img_size, word_level=word_level)
         else: 
-            self.dataset = captionDataset(root="data/images/", annotations="data/captions.txt", img_size=img_size, word_level=word_level)
+            self.dataset = captionDataset(root="data\\images\\", annotations="data\\captions.txt", img_size=img_size, word_level=word_level)
             
         self.train_data, self.test_data = torch.utils.data.random_split(self.dataset, [math.ceil(len(self.dataset)*.8),math.floor(len(self.dataset)*.2)])
         self.test_data, self.val_data = torch.utils.data.random_split(self.test_data, [math.ceil(len(self.test_data)*.5),math.floor(len(self.test_data)*.5)])
@@ -312,11 +312,13 @@ class captionGen: #wrapper object for easy training
                 self.sample(3, .2)
     
     def sample(self, count = 1, temp = .2):
-        for _ in range(count):
-            idx = random.randint(0,len(self.test_data)-1)
-            plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
-            plt.show()
-            print(self.caption(self.test_data[idx][0], temp) + "\n")
+        for curr_temp in (temp if type(temp) is list else [temp]):
+            print(f"\n===========TEMP {curr_temp}===========")
+            for _ in range(count):
+                idx = random.randint(0,len(self.test_data)-1)
+                plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
+                plt.show()
+                print(self.caption(self.test_data[idx][0], curr_temp) + "\n")
 
     def caption(self, image, temp):
         return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen, temp)
