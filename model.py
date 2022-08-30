@@ -11,9 +11,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
 from random import randint
+import skimage
 from skimage import io, transform
 import math
 import random
+from pycocotools.coco import COCO
+import string
 
 class captionDataset(torch.utils.data.Dataset):
     vocab = []
@@ -68,7 +71,62 @@ class captionDataset(torch.utils.data.Dataset):
         img = io.imread(self.root+self.X[idx]) #using skimiage because its RGB and way faster than pillow
         img = cv2.resize(img,(self.IMG_SIZE,self.IMG_SIZE)).reshape(-1, self.IMG_SIZE, self.IMG_SIZE)/255.0
         caption = np.array(self.y[idx])
-        return img.astype(np.float32), caption.astype(np.int64) #cast as float and long numpy arrays  
+        return img.astype(np.float32), caption.astype(np.int64) #cast as float and long numpy arrays
+    
+class cocoDataset(torch.utils.data.Dataset):
+    def __init__(self, root="data\\coco\\train2017\\", annotations="data\\coco\\annotations\\captions_train2017.json", img_size=299, word_level=False):
+        self.root = root
+        self.word_level = word_level
+        self.IMG_SIZE = img_size
+        
+        self.coco = COCO(annotations)
+        self.ids = list(self.coco.anns.keys())
+        
+        #get vocab and maxlen here
+        self.vocab = ["<PAD>", "<START>", "<END>", "\xa0"]
+        new_vocab = set()
+        self.maxlen = 0
+        
+        if word_level:
+            for i in self.coco.anns.values():
+                caption = list(filter(None, i["caption"].translate(str.maketrans('', '', string.punctuation+"\n'")).split(" ")))
+                for word in caption:
+                    new_vocab.add(word)
+                if len(caption) > self.maxlen:
+                    self.maxlen = len(caption)
+        else:
+            for i in self.coco.anns.values():
+                caption = i["caption"].translate(str.maketrans('', '', string.punctuation+"\n'"))
+                for char in caption:
+                    new_vocab.add(char)
+                if len(caption) > self.maxlen:
+                    self.maxlen = len(caption)
+        self.maxlen += 2
+        
+        self.vocab += sorted(new_vocab)
+                
+        
+        self.char_to_int = dict((c, i) for i, c in enumerate(self.vocab))
+        self.int_to_char = dict((i, c) for i, c in enumerate(self.vocab))
+        
+    def __len__(self):
+        return len(self.ids)
+    
+    def __getitem__(self, idx):
+        ID = self.ids[idx]
+        caption = self.coco.anns[ID]['caption'].translate(str.maketrans('', '', string.punctuation+"\n'")) #this might be a bottleneck
+        tokenized = [1] # 1 represents <START>
+        tokenized += [self.char_to_int[i] for i in (list(filter(None, caption.split(" "))) if self.word_level else caption)]
+        tokenized += [2] + [0]*(self.maxlen-len(tokenized)-1) # 2 represents <END> and 0 is <PAD>
+        
+        img_id = self.coco.anns[ID]['image_id']
+        path = self.coco.loadImgs(img_id)[0]['file_name']
+        img = io.imread(self.root+path) #using skimiage because its RGB and way faster than pillow
+        if len(img.shape) == 2:
+            img = skimage.color.gray2rgb(img)
+        img = cv2.resize(img,(self.IMG_SIZE,self.IMG_SIZE)).reshape(3, self.IMG_SIZE, self.IMG_SIZE)/255.0
+        
+        return img.astype(np.float32), np.array(tokenized).astype(np.int64)
 
 class encoderCNN(nn.Module):
     def __init__(self):
@@ -255,11 +313,13 @@ class CaptionNet(nn.Module):
         
         
 class captionGen: #wrapper object for easy training
-    def __init__(self, img_size, big_data = False, word_level = False):
+    def __init__(self, img_size, big_data = 0, word_level = False):
         self.history = {"train_loss":[], "validation_loss":[]}
         self.WORD_LEVEL = word_level
         
-        if big_data:
+        if big_data==2:
+            self.dataset = cocoDataset(root="data\\coco\\train2017\\", annotations="data\\coco\\annotations\\captions_train2017.json", img_size=img_size, word_level=word_level)
+        elif big_data==1:
             self.dataset = captionDataset(root="data\\big_images\\", annotations="data\\big_captions.txt", img_size=img_size, word_level=word_level)
         else: 
             self.dataset = captionDataset(root="data\\images\\", annotations="data\\captions.txt", img_size=img_size, word_level=word_level)
@@ -309,11 +369,11 @@ class captionGen: #wrapper object for easy training
             self.history["validation_loss"] += [val_loss_sum/len(valdataloader)]
             
             if verbose == 2:
-                self.sample(3, .2)
+                self.sample(1, .35)
     
     def sample(self, count = 1, temp = .2):
         for curr_temp in (temp if type(temp) is list else [temp]):
-            print(f"\n===========TEMP {curr_temp}===========")
+            print(f"===========TEMP {curr_temp}===========")
             for _ in range(count):
                 idx = random.randint(0,len(self.test_data)-1)
                 plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
