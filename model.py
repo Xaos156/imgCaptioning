@@ -179,7 +179,6 @@ class pretrained_encoderCNN(nn.Module):
 class BahdanauAttention(nn.Module):
     """ Class performs Additive Bahdanau Attention.
         Source: https://medium.com/analytics-vidhya/image-captioning-with-attention-part-1-e8a5f783f6d3
-     
     """    
     def __init__(self, num_features, hidden_dim, attention_dim, output_dim = 1):
         super(BahdanauAttention, self).__init__()
@@ -261,11 +260,12 @@ class decoderRNN(nn.Module):
             context, atten_weight = self.attention(features, h)
             input_concat = torch.cat([word_embed, context],dim=1)
             h, c = self.lstm(input_concat, (h,c))
-            h = self.dropout(h)
+            if force_prob != 1:
+                h = self.dropout(h)
             output = self.fc(h)
             if use_sampling:
-                scaled_output = output / self.force_temp
-                scoring = F.log_softmax(scaled_output, dim=1)
+                scaled_output = F.log_softmax(output, dim=1) / self.force_temp
+                scoring = F.softmax(scaled_output, dim=1)
                 top_idx = scoring.topk(1)[1]
                 word_embed = self.embed(top_idx).squeeze(1)
             outputs[:, t, :] = output
@@ -289,26 +289,76 @@ class CaptionNet(nn.Module):
         x = self.decoder(x, captions, self.force_prob)
         return x
     
-    def caption(self, image, int_to_char, maxlen, temp = .2):
+    def caption(self, image, int_to_char, maxlen, temp = .2, beam_width = 1, beam_n = 1):
         result = ""
-        caption = torch.Tensor([[1]]).type(torch.LongTensor).to(self.device)
-        
         with torch.no_grad():
             features = self.encoder(torch.Tensor(image).unsqueeze(0).to(self.device))
             
-            for _ in range(maxlen):
-                output = self.decoder(features, caption, force_prob=1)
-                scaled_output = output.squeeze(0)[-1] / temp
-                scoring = F.log_softmax(scaled_output, dim=0)
-                pred = scoring.topk(1)[1]
+            if beam_width <= 1 and beam_n <= 1:
+                caption = torch.Tensor([[1]]).type(torch.LongTensor).to(self.device)
                 
-                if int_to_char[pred.item()] == "<END>": #stop token
-                    break
+                for _ in range(maxlen):
+                    output = self.decoder(features, caption, force_prob=1)
+                    scaled_output = F.log_softmax(output.squeeze(0)[-1], dim=0) / temp
+                    scoring = F.softmax(scaled_output, dim=0)
+                    pred = scoring.topk(1)[1]
+                    if int_to_char[pred.item()] == "<END>": #stop token
+                        break
+
+                    result += int_to_char[pred.item()] + (" " if self.word_level else "")
+                    caption = torch.cat((caption, pred.unsqueeze(0)), dim=1)
+            
+            else: #Beam Search
+                hypotheses = torch.Tensor([[1]]).type(torch.LongTensor).to(self.device)
+                scores = [0]*beam_width
                 
-                result += int_to_char[pred.item()] + (" " if self.word_level else "")
-                caption = torch.cat((caption, pred.unsqueeze(0)), dim=1)
+                completed = []
+                while len(completed) < beam_n:
+                    #print(hypotheses, scores)
+                    output = self.decoder(features.repeat(hypotheses.size(0), 1, 1), hypotheses, force_prob=1)[:,-1]
+                    output = F.log_softmax(output, dim=1)
+                    new_scores, tokens = output.topk(k = beam_width, dim = 1)
+                    #print(new_scores, tokens)
+
+                    contenders = []
+                    for i in range(hypotheses.size(0)):
+                        for j in range(beam_width):
+                            contenders += [(scores[i]+new_scores[i][j].item(), torch.cat((hypotheses[i], tokens[i][j].unsqueeze(0)), dim=0))]
+                    contenders = sorted(contenders, key=(lambda y: y[0]), reverse = True)
+                    #print(contenders)
                     
-        return result
+                    moving_delimiter = 0
+                    remove_list = []
+                    for idx in range(len(contenders)):
+                        if idx < beam_width + moving_delimiter and int_to_char[contenders[idx][1][-1].item()] == "<END>":
+                            completed += [contenders[idx]] #add to output list
+                            #print(f"COMPLETED {contenders[idx]}")
+                            remove_list += [idx]
+                            moving_delimiter += 1
+                        elif int_to_char[contenders[idx][1][-1].item()] == "<END>":
+                            remove_list += [idx]
+                    for idx in sorted(remove_list, reverse = True):
+                        del contenders[idx]
+                    
+                    if hypotheses.size(0) < beam_width:
+                        for _ in range(beam_width - hypotheses.size(0)):
+                            hypotheses = torch.cat((hypotheses, torch.Tensor([[0]*hypotheses.size(1)]).type(torch.LongTensor).to(self.device)),dim=0)
+                    hypotheses = torch.cat((hypotheses, torch.Tensor([[0]]*hypotheses.size(0)).type(torch.LongTensor).to(self.device)),dim=1)
+                    
+                    for i in range(beam_width):
+                        try:
+                            scores[i] = contenders[i][0]
+                            hypotheses[i] = contenders[i][1]
+                        except:
+                            scores[i] = contenders[0][0] #repopulate hypotheses with highest probability answers
+                            hypotheses[i] = contenders[0][1]
+                    #input("-"*35)
+                #print(f"DONE!!! {sorted(completed, key=(lambda z: z[0]/z[1].size(0)), reverse = True)}")
+                #normalize by length then pick the hypothesis with the highest score
+                result = (" " if self.word_level else "").join([int_to_char[i.item()] for i in max(completed, key=(lambda z: z[0]/z[1].size(0)))[1] if i.item() not in [0,1,2]])
+                
+            
+        return result.strip()
         
         
         
@@ -348,10 +398,10 @@ class captionGen: #wrapper object for easy training
         
         for epoch in range(epochs):
             loss_sum = 0
-            for data in tqdm(dataloader, desc = "training") if verbose in [1,2] else dataloader:
+            for data in tqdm(dataloader, desc = f"Epoch {epoch+1}/{epochs} training") if verbose in [1,2] else dataloader:
                 self.net.zero_grad()
                 outputs = self.net(data[0].to(self.device), data[1].to(self.device)[:,:-1]) #input caption excludes last word
-                loss = loss_criterion(outputs.reshape(-1,outputs.shape[2]), data[1][:,1:].reshape(-1).to(self.device)) #target caption excludes first word
+                loss = loss_criterion(outputs.view(-1,outputs.shape[2]), data[1][:,1:].reshape(-1).to(self.device)) #target caption excludes first word
                 loss_sum += loss.item()
                 loss.backward()
                 optimizer.step()
@@ -363,7 +413,7 @@ class captionGen: #wrapper object for easy training
             for val_data in tqdm(valdataloader, desc = "validating") if verbose in [1,2] else valdataloader:
                 with torch.no_grad():
                     outputs = self.net(val_data[0].to(self.device), val_data[1].to(self.device)[:,:-1])
-                    val_loss_sum += loss_criterion(outputs.reshape(-1,outputs.shape[2]), val_data[1][:,1:].reshape(-1).to(self.device)).item()
+                    val_loss_sum += loss_criterion(outputs.view(-1,outputs.shape[2]), val_data[1][:,1:].reshape(-1).to(self.device)).item()
             if verbose in [1,2]:
                 print(f"val loss:\t{val_loss_sum/len(valdataloader)}")
             self.history["validation_loss"] += [val_loss_sum/len(valdataloader)]
@@ -371,17 +421,14 @@ class captionGen: #wrapper object for easy training
             if verbose == 2:
                 self.sample(1, .35)
     
-    def sample(self, count = 1, temp = .2):
+    def sample(self, count = 1, temp = .2, beam_width = 1, beam_n = 1):
         for curr_temp in (temp if type(temp) is list else [temp]):
-            print(f"===========TEMP {curr_temp}===========")
+            print(f"===========TEMP {curr_temp}===========" if beam_width <= 1 and beam_n <= 1 else f"===========BEAM===========")
             for _ in range(count):
                 idx = random.randint(0,len(self.test_data)-1)
                 plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
                 plt.show()
-                print(self.caption(self.test_data[idx][0], curr_temp) + "\n")
-
-    def caption(self, image, temp):
-        return self.net.caption(image, self.dataset.int_to_char, self.dataset.maxlen, temp)
+                print(self.net.caption(self.test_data[idx][0], self.dataset.int_to_char, self.dataset.maxlen, curr_temp, beam_width, beam_n) + "\n")
     
     def curves(self):
         plt.xlabel("Epochs")
