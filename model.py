@@ -1,4 +1,4 @@
-#using flickr 8k and 30k datasets
+#using flickr 8k, flickr 30k, and COCO datasets
 import os
 import cv2
 import csv
@@ -80,7 +80,7 @@ class cocoDataset(torch.utils.data.Dataset):
         self.IMG_SIZE = img_size
         
         self.coco = COCO(annotations)
-        self.ids = list(self.coco.anns.keys())
+        self.ids = sorted(list(self.coco.anns.keys()), key = (lambda z: self.coco.anns[z]['image_id']))
         
         #get vocab and maxlen here
         self.vocab = ["<PAD>", "<START>", "<END>", "\xa0"]
@@ -127,6 +127,21 @@ class cocoDataset(torch.utils.data.Dataset):
         img = cv2.resize(img,(self.IMG_SIZE,self.IMG_SIZE)).reshape(3, self.IMG_SIZE, self.IMG_SIZE)/255.0
         
         return img.astype(np.float32), np.array(tokenized).astype(np.int64)
+    
+class train_val_test_split(torch.utils.data.Dataset):
+    def __init__(self, dataset, split = (.8, .15, .05), mode="train"):
+        self.dataset = dataset
+        self.split = split
+        self.mode = 0 if mode == "train" else 1 if mode == "val" else 2 if mode == "test" else -1
+        self.interval = (round(sum(split[0:self.mode])*len(dataset)), round(sum(split[0:self.mode+1])*len(dataset)))
+        
+    def __len__(self):
+        return round(len(self.dataset) * self.split[self.mode])
+        
+    def __getitem__(self, idx):
+        # if idx+self.interval[0] >= self.interval[1]:
+        #     raise StopIteration
+        return self.dataset[idx+self.interval[0]]
 
 class encoderCNN(nn.Module):
     def __init__(self):
@@ -260,8 +275,7 @@ class decoderRNN(nn.Module):
             context, atten_weight = self.attention(features, h)
             input_concat = torch.cat([word_embed, context],dim=1)
             h, c = self.lstm(input_concat, (h,c))
-            if force_prob != 1:
-                h = self.dropout(h)
+            h = self.dropout(h)
             output = self.fc(h)
             if use_sampling:
                 scaled_output = F.log_softmax(output, dim=1) / self.force_temp
@@ -289,7 +303,7 @@ class CaptionNet(nn.Module):
         x = self.decoder(x, captions, self.force_prob)
         return x
     
-    def caption(self, image, int_to_char, maxlen, temp = .2, beam_width = 1, beam_n = 1):
+    def caption(self, image, int_to_char, maxlen, temp = .2, beam_width = 1, beam_n = 1, verbose = 0):
         result = ""
         with torch.no_grad():
             features = self.encoder(torch.Tensor(image).unsqueeze(0).to(self.device))
@@ -314,25 +328,27 @@ class CaptionNet(nn.Module):
                 
                 completed = []
                 while len(completed) < beam_n:
-                    #print(hypotheses, scores)
                     output = self.decoder(features.repeat(hypotheses.size(0), 1, 1), hypotheses, force_prob=1)[:,-1]
                     output = F.log_softmax(output, dim=1)
                     new_scores, tokens = output.topk(k = beam_width, dim = 1)
-                    #print(new_scores, tokens)
 
                     contenders = []
                     for i in range(hypotheses.size(0)):
                         for j in range(beam_width):
                             contenders += [(scores[i]+new_scores[i][j].item(), torch.cat((hypotheses[i], tokens[i][j].unsqueeze(0)), dim=0))]
                     contenders = sorted(contenders, key=(lambda y: y[0]), reverse = True)
-                    #print(contenders)
+                    if verbose == 1:
+                        print(hypotheses, scores)
+                        print(f"{new_scores}\n{tokens}")
+                        print(contenders)
                     
                     moving_delimiter = 0
                     remove_list = []
                     for idx in range(len(contenders)):
                         if idx < beam_width + moving_delimiter and int_to_char[contenders[idx][1][-1].item()] == "<END>":
                             completed += [contenders[idx]] #add to output list
-                            #print(f"COMPLETED {contenders[idx]}")
+                            if verbose == 1:
+                                print(f"COMPLETED {contenders[idx]}")
                             remove_list += [idx]
                             moving_delimiter += 1
                         elif int_to_char[contenders[idx][1][-1].item()] == "<END>":
@@ -352,8 +368,11 @@ class CaptionNet(nn.Module):
                         except:
                             scores[i] = contenders[0][0] #repopulate hypotheses with highest probability answers
                             hypotheses[i] = contenders[0][1]
-                    #input("-"*35)
-                #print(f"DONE!!! {sorted(completed, key=(lambda z: z[0]/z[1].size(0)), reverse = True)}")
+                    if verbose == 1:
+                        input("-"*35)
+                    #print("="*45)
+                if verbose == 1:
+                    print(f"DONE!!! {sorted(completed, key=(lambda z: z[0]/z[1].size(0)), reverse = True)}")
                 #normalize by length then pick the hypothesis with the highest score
                 result = (" " if self.word_level else "").join([int_to_char[i.item()] for i in max(completed, key=(lambda z: z[0]/z[1].size(0)))[1] if i.item() not in [0,1,2]])
                 
@@ -374,9 +393,10 @@ class captionGen: #wrapper object for easy training
         else: 
             self.dataset = captionDataset(root="data\\images\\", annotations="data\\captions.txt", img_size=img_size, word_level=word_level)
             
-        self.train_data, self.test_data = torch.utils.data.random_split(self.dataset, [math.ceil(len(self.dataset)*.8),math.floor(len(self.dataset)*.2)])
-        self.test_data, self.val_data = torch.utils.data.random_split(self.test_data, [math.ceil(len(self.test_data)*.5),math.floor(len(self.test_data)*.5)])
-        print(f"{len(self.train_data)} training {len(self.test_data)} testing {len(self.val_data)} validation")
+        self.train_data = train_val_test_split(self.dataset, split=(.8,.1,.1), mode = "train")
+        self.val_data = train_val_test_split(self.dataset, split=(.8,.1,.1), mode = "val")
+        self.test_data = train_val_test_split(self.dataset, split=(.8,.1,.1), mode = "test")
+        print(f"{len(self.train_data)} training {len(self.val_data)} validation {len(self.test_data)} testing")
     
     def define(self, embedding_dim, hidden_size, attention_dim, dropout, force_temp, force_prob, pretrained):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -397,11 +417,12 @@ class captionGen: #wrapper object for easy training
         loss_criterion = nn.CrossEntropyLoss(ignore_index=self.dataset.char_to_int["<PAD>"])
         
         for epoch in range(epochs):
+            self.net.train()
             loss_sum = 0
             for data in tqdm(dataloader, desc = f"Epoch {epoch+1}/{epochs} training") if verbose in [1,2] else dataloader:
                 self.net.zero_grad()
                 outputs = self.net(data[0].to(self.device), data[1].to(self.device)[:,:-1]) #input caption excludes last word
-                loss = loss_criterion(outputs.view(-1,outputs.shape[2]), data[1][:,1:].reshape(-1).to(self.device)) #target caption excludes first word
+                loss = loss_criterion(outputs.view(-1,outputs.size(2)), data[1][:,1:].reshape(-1).to(self.device)) #target caption excludes first word
                 loss_sum += loss.item()
                 loss.backward()
                 optimizer.step()
@@ -409,11 +430,12 @@ class captionGen: #wrapper object for easy training
                 print(f"loss:\t{loss_sum/len(dataloader)}")
             self.history["train_loss"] += [loss_sum/len(dataloader)]
             
+            self.net.eval()
             val_loss_sum = 0
             for val_data in tqdm(valdataloader, desc = "validating") if verbose in [1,2] else valdataloader:
                 with torch.no_grad():
                     outputs = self.net(val_data[0].to(self.device), val_data[1].to(self.device)[:,:-1])
-                    val_loss_sum += loss_criterion(outputs.view(-1,outputs.shape[2]), val_data[1][:,1:].reshape(-1).to(self.device)).item()
+                    val_loss_sum += loss_criterion(outputs.view(-1,outputs.size(2)), val_data[1][:,1:].reshape(-1).to(self.device)).item()
             if verbose in [1,2]:
                 print(f"val loss:\t{val_loss_sum/len(valdataloader)}")
             self.history["validation_loss"] += [val_loss_sum/len(valdataloader)]
@@ -421,14 +443,14 @@ class captionGen: #wrapper object for easy training
             if verbose == 2:
                 self.sample(1, .35)
     
-    def sample(self, count = 1, temp = .2, beam_width = 1, beam_n = 1):
+    def sample(self, count = 1, temp = .2, beam_width = 1, beam_n = 1, verbose = 0):
         for curr_temp in (temp if type(temp) is list else [temp]):
             print(f"===========TEMP {curr_temp}===========" if beam_width <= 1 and beam_n <= 1 else f"===========BEAM===========")
             for _ in range(count):
                 idx = random.randint(0,len(self.test_data)-1)
                 plt.imshow(np.array(self.test_data[idx][0]*255).reshape(self.dataset.IMG_SIZE,self.dataset.IMG_SIZE,3).astype(np.uint8))
                 plt.show()
-                print(self.net.caption(self.test_data[idx][0], self.dataset.int_to_char, self.dataset.maxlen, curr_temp, beam_width, beam_n) + "\n")
+                print(self.net.caption(self.test_data[idx][0], self.dataset.int_to_char, self.dataset.maxlen, curr_temp, beam_width, beam_n, verbose) + "\n")
     
     def curves(self):
         plt.xlabel("Epochs")
