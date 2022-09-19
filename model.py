@@ -89,14 +89,14 @@ class cocoDataset(torch.utils.data.Dataset):
         
         if word_level:
             for i in self.coco.anns.values():
-                caption = list(filter(None, i["caption"].translate(str.maketrans('', '', string.punctuation+"\n'")).split(" ")))
+                caption = list(filter(None, i["caption"].translate(str.maketrans('', '', string.punctuation+"\n")).split(" ")))
                 for word in caption:
                     new_vocab.add(word)
                 if len(caption) > self.maxlen:
                     self.maxlen = len(caption)
         else:
             for i in self.coco.anns.values():
-                caption = i["caption"].translate(str.maketrans('', '', string.punctuation+"\n'"))
+                caption = i["caption"].translate(str.maketrans('', '', string.punctuation+"\n"))
                 for char in caption:
                     new_vocab.add(char)
                 if len(caption) > self.maxlen:
